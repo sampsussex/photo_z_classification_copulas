@@ -1,0 +1,484 @@
+import numpy as np
+from scipy import stats
+from scipy.stats import rankdata
+from scipy.optimize import curve_fit
+from scipy.integrate import cumulative_trapezoid
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# MIXTURE MODEL DEFINITIONS
+# ════════════════════════════════════════════════════════════════════════════════
+
+def linear_gauss(x, w, slope, intercept, mu, sigma):
+    """Normalised linear-component + Gaussian mixture PDF."""
+    linear = np.clip(slope * x + intercept, 0, None)
+    norm_factor = np.trapezoid(linear, x)
+    if norm_factor > 0:
+        linear /= norm_factor
+    gauss = stats.norm.pdf(x, mu, sigma)
+    return w * linear + (1 - w) * gauss
+
+
+def double_gauss(x, w, mu1, s1, mu2, s2):
+    """Two-component Gaussian mixture PDF."""
+    return w * stats.norm.pdf(x, mu1, s1) + (1 - w) * stats.norm.pdf(x, mu2, s2)
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# CDF UTILITIES
+# ════════════════════════════════════════════════════════════════════════════════
+
+def pdf_to_cdf(xr, pdf_vals):
+    """Numerically integrate a PDF array to a normalised CDF."""
+    cdf = cumulative_trapezoid(pdf_vals, xr, initial=0)
+    cdf /= cdf[-1]
+    return cdf
+
+
+def cdf_transform(data, xr, cdf_vals):
+    """Map data to uniform [0,1] via interpolation onto a fitted CDF."""
+    return np.interp(data, xr, cdf_vals)
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# FITTERS  (one per distribution family)
+# ════════════════════════════════════════════════════════════════════════════════
+
+def fit_linear(data, n_bins=30):
+    """
+    Fit a decreasing linear PDF  f(x) = slope·x + intercept  to `data`.
+
+    Returns
+    -------
+    u        : uniform [0,1] marginals
+    xr       : evaluation grid
+    pdf_vals : PDF evaluated on xr
+    cdf_vals : CDF evaluated on xr
+    params   : dict with slope, intercept, x_min, x_max
+    """
+    counts, edges = np.histogram(data, bins=n_bins, density=True)
+    bc = (edges[:-1] + edges[1:]) / 2
+    slope, intercept, *_ = stats.linregress(bc, counts)
+
+    x_min, x_max = data.min(), data.max()
+    C = -(0.5 * slope * x_min**2 + intercept * x_min)
+
+    xr       = np.linspace(x_min, x_max, 10000)
+    pdf_vals = np.clip(slope * xr + intercept, 0, None)
+    cdf_vals = np.clip(0.5 * slope * xr**2 + intercept * xr + C, 0, 1)
+    u        = np.interp(data, xr, cdf_vals)
+
+    params = dict(slope=slope, intercept=intercept, x_min=x_min, x_max=x_max)
+    return u, xr, pdf_vals, cdf_vals, params
+
+
+def fit_linear_gauss(data, n_bins=30):
+    """
+    Fit a linear + Gaussian mixture PDF to `data`.
+
+    Returns
+    -------
+    u        : uniform [0,1] marginals
+    xr       : evaluation grid
+    pdf_vals : PDF evaluated on xr
+    cdf_vals : CDF evaluated on xr
+    params   : dict with w, slope, intercept, mu, sigma
+    """
+    counts, edges = np.histogram(data, bins=n_bins, density=True)
+    bc = (edges[:-1] + edges[1:]) / 2
+
+    p0     = [0.5, -0.1, 1.0, data.mean(), data.std()]
+    bounds = ([0, -10, -10, data.min(), 0.01],
+              [1,  10,  10, data.max(), 10  ])
+
+    popt, _ = curve_fit(linear_gauss, bc, counts, p0=p0,
+                        bounds=bounds, maxfev=20_000)
+    w, slope, intercept, mu, sigma = popt
+
+    xr       = np.linspace(data.min(), data.max(), 10000)
+    pdf_vals = linear_gauss(xr, *popt)
+    cdf_vals = pdf_to_cdf(xr, pdf_vals)
+    u        = cdf_transform(data, xr, cdf_vals)
+
+    params = dict(w=w, slope=slope, intercept=intercept, mu=mu, sigma=sigma)
+    return u, xr, pdf_vals, cdf_vals, params
+
+
+def fit_double_gauss(data, n_bins=30):
+    """
+    Fit a two-component Gaussian mixture PDF to `data`.
+
+    Returns
+    -------
+    u        : uniform [0,1] marginals
+    xr       : evaluation grid
+    pdf_vals : PDF evaluated on xr
+    cdf_vals : CDF evaluated on xr
+    params   : dict with w, mu1, s1, mu2, s2
+    """
+    counts, edges = np.histogram(data, bins=n_bins, density=True)
+    bc = (edges[:-1] + edges[1:]) / 2
+
+    p0     = [0.5, data.mean() - 0.5, data.std() * 0.5,
+                   data.mean() + 0.5, data.std() * 0.5]
+    bounds = ([0, -10, 0.01, -10, 0.01],
+              [1,  10,    5,  10,    5])
+
+    popt, _ = curve_fit(double_gauss, bc, counts, p0=p0,
+                        bounds=bounds, maxfev=20_000)
+    w, mu1, s1, mu2, s2 = popt
+
+    xr       = np.linspace(data.min() - 0.5, data.max() + 0.5, 10000)
+    pdf_vals = double_gauss(xr, *popt)
+    cdf_vals = pdf_to_cdf(xr, pdf_vals)
+    u        = cdf_transform(data, xr, cdf_vals)
+
+    params = dict(w=w, mu1=mu1, s1=s1, mu2=mu2, s2=s2)
+    return u, xr, pdf_vals, cdf_vals, params
+
+
+def fit_single_gauss(data):
+    """
+    Fit a single Gaussian PDF to `data` via MLE.
+
+    Returns
+    -------
+    u        : uniform [0,1] marginals
+    xr       : evaluation grid
+    pdf_vals : PDF evaluated on xr
+    cdf_vals : CDF evaluated on xr
+    params   : dict with mu, sigma
+    """
+    mu, sigma = stats.norm.fit(data)
+
+    xr       = np.linspace(data.min() - 0.5, data.max() + 0.5, 10000)
+    pdf_vals = stats.norm.pdf(xr, mu, sigma)
+    cdf_vals = pdf_to_cdf(xr, pdf_vals)
+    u        = cdf_transform(data, xr, cdf_vals)
+
+    params = dict(mu=mu, sigma=sigma)
+    return u, xr, pdf_vals, cdf_vals, params
+
+
+def report_fit(label, family, params):
+    """Print a one-line summary of a fitted distribution."""
+    if family == "linear":
+        print(f"{label:25s}  linear({params['slope']:.3f}x + {params['intercept']:.3f})")
+    elif family == "linear_gauss":
+        p = params
+        print(f"{label:25s}  w={p['w']:.3f}  "
+              f"linear({p['slope']:.3f}x + {p['intercept']:.3f})  "
+              f"N({p['mu']:.3f}, {p['sigma']:.3f})")
+    elif family == "double_gauss":
+        p = params
+        print(f"{label:25s}  w={p['w']:.3f}  "
+              f"N({p['mu1']:.3f}, {p['s1']:.3f})  "
+              f"N({p['mu2']:.3f}, {p['s2']:.3f})")
+    elif family == "single_gauss":
+        print(f"{label:25s}  N({params['mu']:.3f}, {params['sigma']:.3f})")
+        
+
+def fit_all_marginals(x_all, x_fn, y_all, y_fn):
+    """
+    Fit parametric marginal distributions to each variable/subset pair
+    and return uniform [0,1] transforms alongside fit diagnostics.
+
+    Parameters
+    ----------
+    x_all : array  –  magnitude for all objects
+    x_fn  : array  –  magnitude for false-negative subset
+    y_all : array  –  g−i colour for all objects
+    y_fn  : array  –  g−i colour for false-negative subset
+
+    Returns
+    -------
+    dict keyed by variable name, each containing
+        'u'        – uniform marginals
+        'xr'       – evaluation grid   (None for linear fit)
+        'pdf_vals' – PDF on grid        (callable for linear fit)
+        'cdf_vals' – CDF on grid        (callable for linear fit)
+        'params'   – fitted parameters
+    """
+    results = {}
+
+    # 1. x_all  →  linear PDF
+    u, xr, pdf_vals, cdf_vals, params = fit_linear(x_all)
+    report_fit("x_all", "linear", params)
+    results["x_all"] = dict(x=x_all, u=u, xr=xr, pdf_vals=pdf_vals,
+                            cdf_vals=cdf_vals, params=params)
+
+    # 2. x_fn  →  linear + Gaussian mixture
+    u, xr, pdf_vals, cdf_vals, params = fit_linear_gauss(x_fn)
+    report_fit("x_fn", "linear_gauss", params)
+    results["x_fn"] = dict(x=x_fn, u=u, xr=xr, pdf_vals=pdf_vals,
+                           cdf_vals=cdf_vals, params=params)
+
+    # 3. y_all  →  double Gaussian
+    u, xr, pdf_vals, cdf_vals, params = fit_double_gauss(y_all)
+    report_fit("y_all", "double_gauss", params)
+    results["y_all"] = dict(x=y_all, u=u, xr=xr, pdf_vals=pdf_vals,
+                            cdf_vals=cdf_vals, params=params)
+
+    # 4. y_fn  →  single Gaussian
+    u, xr, pdf_vals, cdf_vals, params = fit_single_gauss(y_fn)
+    report_fit("y_fn", "single_gauss", params)
+    results["y_fn"] = dict(x=y_fn, u=u, xr=xr, pdf_vals=pdf_vals,
+                           cdf_vals=cdf_vals, params=params)
+
+    return results
+
+
+#### EMPIRCAL TRANSFORMS
+
+#def compute_histogram_pdf(data, n_bins=50, x_min=0):
+#    bins = np.linspace(data.min(), data.max(), n_bins + 1)
+#    counts, edges = np.histogram(data, bins=bins, density=True)
+#    xr = (edges[:-1] + edges[1:]) / 2
+#    return xr, counts
+
+def compute_histogram_pdf(data, n_bins=80, x_min=0):
+    log_data = np.log(data)
+    bins = np.linspace(log_data.min(), log_data.max(), n_bins + 1)
+    counts, edges = np.histogram(log_data, bins=bins, density=True)
+    xr_log = (edges[:-1] + edges[1:]) / 2
+    xr = np.exp(xr_log)
+    # Jacobian correction: p(x) = p(log x) / x
+    pdf_vals = counts / xr
+    return xr, pdf_vals
+
+
+def fit_empirical(data, n_bins=30, x_min=0):
+    # ECDF
+    xr_cdf = np.sort(data)
+    n = len(xr_cdf)
+    cdf_vals_full = np.arange(1, n + 1) / n
+    u = np.interp(data, xr_cdf, cdf_vals_full)
+
+    # Histogram PDF
+    xr, pdf_vals = compute_histogram_pdf(data, n_bins=n_bins, x_min=x_min)
+
+    # Interpolate CDF onto histogram grid so everything shares xr
+    cdf_vals = np.interp(xr, xr_cdf, cdf_vals_full, left=0, right=1)
+
+    params = dict(x_min=xr[0], x_max=xr[-1])
+    return u, xr, pdf_vals, cdf_vals, params
+
+
+
+def fit_all_marginals_empirical(x_all, x_fn, y_all, y_fn):
+    """
+    Compute empirical marginal CDFs for each variable/subset pair
+    and return uniform [0,1] transforms.
+
+    Parameters
+    ----------
+    x_all : array  –  magnitude for all objects
+    x_fn  : array  –  magnitude for false-negative subset
+    y_all : array  –  g−i colour for all objects
+    y_fn  : array  –  g−i colour for false-negative subset
+
+    Returns
+    -------
+    dict keyed by variable name, each containing
+        'u'        – uniform [0,1] marginals
+        'xr'       – sorted data values (ECDF x-axis)
+        'pdf_vals' – None
+        'cdf_vals' – empirical CDF values on xr
+        'params'   – dict with x_min, x_max
+    """
+    results = {}
+
+    for label, data in [("x_all", x_all), ("x_fn", x_fn),
+                        ("y_all", y_all), ("y_fn",  y_fn)]:
+        u, xr, pdf_vals, cdf_vals, params = fit_empirical(data)
+        print(f"{label:25s}  empirical ECDF  "
+              f"[{params['x_min']:.3f}, {params['x_max']:.3f}]  "
+              f"n={len(data)}")
+        results[label] = dict(x=data, u=u, xr=xr, pdf_vals=pdf_vals,
+                              cdf_vals=cdf_vals, params=params)
+
+    return results
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# INVERSE CDF  (uniform → real space)
+# ════════════════════════════════════════════════════════════════════════════════
+
+def inverse_cdf_numerical(u, xr, cdf_vals):
+    """Map u in [0,1] back to x via interpolation of the numerical CDF."""
+    return np.interp(np.asarray(u), cdf_vals, xr)
+
+
+def inverse_cdf_linear(u, params):
+    """
+    Analytic inverse of F(x) = 0.5*slope*x^2 + intercept*x + C.
+    Solves the quadratic for x given u in [0,1].
+    """
+    slope     = params['slope']
+    intercept = params['intercept']
+    x_min     = params['x_min']
+    x_max     = params['x_max']
+    C         = -(0.5 * slope * x_min**2 + intercept * x_min)
+
+    u = np.asarray(u)
+    a_coef = 0.5 * slope
+    b_coef = intercept
+    c_coef = C - u
+
+    if abs(a_coef) < 1e-12:           # degenerate: nearly flat, linear solve
+        return np.clip(-c_coef / b_coef, x_min, x_max)
+
+    discriminant = np.clip(b_coef**2 - 4 * a_coef * c_coef, 0, None)
+    x1 = (-b_coef + np.sqrt(discriminant)) / (2 * a_coef)
+    x2 = (-b_coef - np.sqrt(discriminant)) / (2 * a_coef)
+    candidates = np.where(
+        (x1 >= x_min - 1e-6) & (x1 <= x_max + 1e-6), x1, x2
+    )
+    return np.clip(candidates, x_min, x_max)
+
+
+def inverse_cdf_single_gauss(u, params):
+    """Analytic inverse (PPF) of a single Gaussian."""
+    return stats.norm.ppf(np.asarray(u), loc=params['mu'], scale=params['sigma'])
+
+
+def invert_cdf(u, key, pdf_transformations):
+    """
+    Dispatch inverse CDF for any key in pdf_transformations.
+    Uses analytic inverse where available, numerical otherwise.
+    """
+    res = pdf_transformations[key]
+    if key == 'x_all':
+        return inverse_cdf_linear(u, res['params'])
+    elif key == 'y_fn':
+        return inverse_cdf_single_gauss(u, res['params'])
+    else:
+        return inverse_cdf_numerical(u, res['xr'], res['cdf_vals'])
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# FORWARD CDF  (real space → uniform [0,1])
+# ════════════════════════════════════════════════════════════════════════════════
+
+def forward_cdf_linear(x, params):
+    """Analytic CDF for the linear fit."""
+    slope     = params['slope']
+    intercept = params['intercept']
+    x_min     = params['x_min']
+    C         = -(0.5 * slope * x_min**2 + intercept * x_min)
+    return np.clip(0.5 * slope * x**2 + intercept * x + C, 0, 1)
+
+
+def forward_cdf_numerical(x, xr, cdf_vals):
+    """Map x in real space to u in [0,1] via interpolation of the numerical CDF."""
+    return np.interp(np.asarray(x), xr, cdf_vals, left=0, right=1)
+
+
+def forward_cdf_single_gauss(x, params):
+    """Analytic CDF of a single Gaussian."""
+    return stats.norm.cdf(np.asarray(x), loc=params['mu'], scale=params['sigma'])
+
+
+def forward_cdf(x, key, pdf_transformations, model_type = 'parametric'):
+    """
+    Dispatch forward CDF for any key in pdf_transformations.
+    Uses analytic CDF where available, numerical otherwise.
+    """
+    if model_type not in ['parametric', 'empirical']:
+        raise ValueError("model_type must be either 'parametric' or 'empirical'")
+    
+    res = pdf_transformations[key]
+    if model_type == 'parametric':
+        if key == 'x_all':
+            return forward_cdf_linear(x, res['params'])
+        elif key == 'y_fn':
+            return forward_cdf_single_gauss(x, res['params'])
+        else:
+            return forward_cdf_numerical(x, res['xr'], res['cdf_vals'])
+    elif model_type == 'empirical':
+        return forward_cdf_numerical(x, res['xr'], res['cdf_vals'])
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# PDF  (density evaluation)
+# ════════════════════════════════════════════════════════════════════════════════
+
+def density_numerical(x, xr, pdf_vals):
+    """Interpolate density at x from a precomputed PDF array."""
+    return np.interp(np.asarray(x), xr, pdf_vals, left=0, right=0)
+
+
+def density_linear(x, params):
+    """Analytic linear PDF."""
+    return np.clip(params['slope'] * np.asarray(x) + params['intercept'], 0, None)
+
+
+def density_single_gauss(x, params):
+    """Analytic single Gaussian PDF."""
+    return stats.norm.pdf(np.asarray(x), loc=params['mu'], scale=params['sigma'])
+
+
+def empirical_cdf(x):
+    """Map data to uniform [0,1] via empirical CDF (rank-based)."""
+    return rankdata(np.asarray(x)) / (len(x) + 1)
+
+
+def density(x, key, pdf_transformations, model_type='parametric'):
+    """
+    Dispatch PDF evaluation for any key in pdf_transformations.
+    Uses analytic PDF where available, numerical otherwise.
+    """
+    if model_type not in ['parametric', 'empirical']:
+        raise ValueError("model_type must be either 'parametric' or 'empirical'")
+    res = pdf_transformations[key]
+    if model_type == 'parametric':
+        if key == 'x_all':
+            return density_linear(x, res['params'])
+        elif key == 'y_fn':
+            return density_single_gauss(x, res['params'])
+        else:
+            return density_numerical(x, res['xr'], res['pdf_vals'])
+    elif model_type == 'empirical':
+        return density_numerical(x, res['xr'], res['pdf_vals'])
+
+
+def xy2xy_parameteric_cdf_transform(xy, pdf_transformations):
+    """
+    Transform a new (x, y) dataset into the g09 marginal space.
+
+    Applies an empirical CDF to each marginal of `xy`, then maps
+    through the inverse CDFs of x_all (linear) and y_all (double Gaussian).
+
+    Parameters
+    ----------
+    xy      : array of shape (n, 2)
+    pdf_transformations : dict returned by fit_all_marginals()
+
+    Returns
+    -------
+    array of shape (n, 2) in the g09 marginal space
+    """
+    x, y = xy[:, 0], xy[:, 1]
+
+    u = empirical_cdf(x)
+    v = empirical_cdf(y)
+
+    x_transformed = invert_cdf(u, 'x_all', pdf_transformations)
+    y_transformed = invert_cdf(v, 'y_all', pdf_transformations)
+
+    return np.column_stack([x_transformed, y_transformed])
+
+
+def empirical_cdf_transform(values, reference):
+        ref_sorted = np.sort(reference)
+        probs = np.arange(1, len(reference) + 1) / (len(reference) + 1)
+        # Forward: map input values to CDF probabilities using reference distribution
+        u = np.interp(values, ref_sorted, probs)
+        # Inverse: map those probabilities back to the reference domain (quantile transform)
+        x_transformed = np.interp(u, probs, ref_sorted)
+        return x_transformed
+
+def xy2xy_empirical_cdf_transform(xy_input, xy_original):
+    x = empirical_cdf_transform(xy_input[:, 0], xy_original[:, 0])
+    y = empirical_cdf_transform(xy_input[:, 1], xy_original[:, 1])
+    return np.column_stack([x, y])
