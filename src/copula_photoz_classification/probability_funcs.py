@@ -1,6 +1,7 @@
 import numpy as np
 from scipy import stats
 from scipy.stats import rankdata
+from scipy.stats import gaussian_kde
 from scipy.optimize import curve_fit
 from scipy.integrate import cumulative_trapezoid
 
@@ -43,6 +44,82 @@ def cdf_transform(data, xr, cdf_vals):
 # ════════════════════════════════════════════════════════════════════════════════
 # FITTERS  (one per distribution family)
 # ════════════════════════════════════════════════════════════════════════════════
+
+
+
+def fit_pareto(data, n_bins=30):
+    """
+    Fit a Pareto PDF to `data` via MLE.
+
+    Returns
+    -------
+    u        : uniform [0,1] marginals
+    xr       : evaluation grid
+    pdf_vals : PDF evaluated on xr
+    cdf_vals : CDF evaluated on xr
+    params   : dict with b, loc, scale
+    """
+    b, loc, scale = stats.pareto.fit(data)
+
+    xr       = np.linspace(0, data.max() + 0.5, 10000)
+    pdf_vals = stats.pareto.pdf(xr, b, loc=loc, scale=scale)
+    cdf_vals = pdf_to_cdf(xr, pdf_vals)
+    u        = cdf_transform(data, xr, cdf_vals)
+
+    params = dict(b=b, loc=loc, scale=scale)
+    return u, xr, pdf_vals, cdf_vals, params
+
+
+def gauss_gennorm(x, w, mu, sigma, beta, gnorm_loc, gnorm_scale):
+    """Gaussian + generalised-normal mixture PDF."""
+    return (w       * stats.norm.pdf(x, mu, sigma) +
+            (1 - w) * stats.gennorm.pdf(x, beta, loc=gnorm_loc, scale=gnorm_scale))
+
+
+def fit_gauss_gennorm(data, n_bins=30):
+    """
+    Fit a Gaussian + generalised-normal mixture PDF to `data`.
+
+    The generalised-normal component is initialised to the right of the
+    Gaussian and with a smaller scale. Its shape parameter beta is free:
+      beta < 1  →  heavier than Laplace
+      beta = 1  →  Laplace
+      beta = 2  →  Gaussian
+
+    Returns
+    -------
+    u        : uniform [0,1] marginals
+    xr       : evaluation grid
+    pdf_vals : PDF evaluated on xr
+    cdf_vals : CDF evaluated on xr
+    params   : dict with w, mu, sigma, beta, gnorm_loc, gnorm_scale
+    """
+    counts, edges = np.histogram(data, bins=n_bins, density=True)
+    bc = (edges[:-1] + edges[1:]) / 2
+
+    mu0         = data.mean() - 0.3
+    gnorm_loc0  = data.mean() + 0.5      # right of the Gaussian
+    sig0        = data.std() * 0.8
+    gnorm_scl0  = data.std() * 0.4       # narrower
+    beta0       = 1.0                    # start at Laplace, let it roam
+
+    p0     = [0.7,  mu0,   sig0,  beta0,  gnorm_loc0,  gnorm_scl0]
+    bounds = ([0,   data.min(), 0.01,  0.1,  data.min(),  0.01],
+              [1,   data.max(),  10,   10,   data.max(),   10 ])
+
+    popt, _ = curve_fit(gauss_gennorm, bc, counts, p0=p0,
+                        bounds=bounds, maxfev=20_000)
+    w, mu, sigma, beta, gnorm_loc, gnorm_scale = popt
+
+    xr       = np.linspace(data.min() - 0.5, data.max() + 0.5, 10000)
+    pdf_vals = gauss_gennorm(xr, *popt)
+    cdf_vals = pdf_to_cdf(xr, pdf_vals)
+    u        = cdf_transform(data, xr, cdf_vals)
+
+    params = dict(w=w, mu=mu, sigma=sigma, beta=beta,
+                  gnorm_loc=gnorm_loc, gnorm_scale=gnorm_scale)
+    return u, xr, pdf_vals, cdf_vals, params
+
 
 def fit_linear(data, n_bins=30):
     """
@@ -169,6 +246,17 @@ def report_fit(label, family, params):
         print(f"{label:25s}  w={p['w']:.3f}  "
               f"linear({p['slope']:.3f}x + {p['intercept']:.3f})  "
               f"N({p['mu']:.3f}, {p['sigma']:.3f})")
+        
+    elif family == "pareto":
+        p = params
+        print(f"{label:25s}  Pareto(b={p['b']:.3f}, loc={p['loc']:.3f}, scale={p['scale']:.3f})")
+
+    elif family == "gauss_gennorm":
+        p = params
+        print(f"{label:25s}  w={p['w']:.3f}  "
+              f"N({p['mu']:.3f}, {p['sigma']:.3f})  "
+              f"GNorm(beta={p['beta']:.3f}, loc={p['gnorm_loc']:.3f}, scale={p['gnorm_scale']:.3f})")
+        
     elif family == "double_gauss":
         p = params
         print(f"{label:25s}  w={p['w']:.3f}  "
@@ -207,15 +295,27 @@ def fit_all_marginals(x_all, x_fn, y_all, y_fn):
     results["x_all"] = dict(x=x_all, u=u, xr=xr, pdf_vals=pdf_vals,
                             cdf_vals=cdf_vals, params=params)
 
-    # 2. x_fn  →  linear + Gaussian mixture
-    u, xr, pdf_vals, cdf_vals, params = fit_linear_gauss(x_fn)
-    report_fit("x_fn", "linear_gauss", params)
+    ## 2. x_fn  →  linear + Gaussian mixture
+    #u, xr, pdf_vals, cdf_vals, params = fit_linear_gauss(x_fn)
+    #report_fit("x_fn", "linear_gauss", params)
+    #results["x_fn"] = dict(x=x_fn, u=u, xr=xr, pdf_vals=pdf_vals,
+    #                       cdf_vals=cdf_vals, params=params)
+    
+    # 2. x_fn  →  Pareto
+    u, xr, pdf_vals, cdf_vals, params = fit_pareto(x_fn)
+    report_fit("x_fn", "pareto", params)
     results["x_fn"] = dict(x=x_fn, u=u, xr=xr, pdf_vals=pdf_vals,
                            cdf_vals=cdf_vals, params=params)
 
     # 3. y_all  →  double Gaussian
-    u, xr, pdf_vals, cdf_vals, params = fit_double_gauss(y_all)
-    report_fit("y_all", "double_gauss", params)
+    #u, xr, pdf_vals, cdf_vals, params = fit_double_gauss(y_all)
+    #report_fit("y_all", "double_gauss", params)
+    #results["y_all"] = dict(x=y_all, u=u, xr=xr, pdf_vals=pdf_vals,
+    #                        cdf_vals=cdf_vals, params=params)
+    
+    # 3. y_all  →  Gaussian + generalised-normal mixture
+    u, xr, pdf_vals, cdf_vals, params = fit_gauss_gennorm(y_all)
+    report_fit("y_all", "gauss_gennorm", params)
     results["y_all"] = dict(x=y_all, u=u, xr=xr, pdf_vals=pdf_vals,
                             cdf_vals=cdf_vals, params=params)
 
@@ -230,34 +330,98 @@ def fit_all_marginals(x_all, x_fn, y_all, y_fn):
 
 #### EMPIRCAL TRANSFORMS
 
-#def compute_histogram_pdf(data, n_bins=50, x_min=0):
-#    bins = np.linspace(data.min(), data.max(), n_bins + 1)
-#    counts, edges = np.histogram(data, bins=bins, density=True)
-#    xr = (edges[:-1] + edges[1:]) / 2
-#    return xr, counts
 
-def compute_histogram_pdf(data, n_bins=80, x_min=0):
-    log_data = np.log(data)
-    bins = np.linspace(log_data.min(), log_data.max(), n_bins + 1)
-    counts, edges = np.histogram(log_data, bins=bins, density=True)
-    xr_log = (edges[:-1] + edges[1:]) / 2
-    xr = np.exp(xr_log)
-    # Jacobian correction: p(x) = p(log x) / x
-    pdf_vals = counts / xr
+def compute_histogram_pdf(data, n_bins=50, x_min=0, zero_frac=0.3, zero_bins=None):
+    """
+    Histogram PDF in original space with denser bins near zero.
+
+    Parameters
+    ----------
+    zero_frac  : fraction of bins allocated to the [x_min, percentile_split] region
+    zero_bins  : if set, overrides zero_frac for the number of fine bins near zero
+    """
+    data = np.asarray(data)
+    data = data[data >= x_min]
+
+    # Split point: e.g. 20th percentile, to concentrate bins where density is high
+    p_split = np.percentile(data, 20)
+
+    n_low  = zero_bins if zero_bins is not None else max(2, int(n_bins * zero_frac))
+    n_high = n_bins - n_low
+
+    low_edges  = np.linspace(x_min, p_split, n_low  + 1)
+    high_edges = np.linspace(p_split, data.max(), n_high + 1)
+
+    # Merge, dropping the duplicated boundary point
+    edges = np.concatenate([low_edges, high_edges[1:]])
+
+    counts, edges = np.histogram(data, bins=edges, density=True)
+    xr = (edges[:-1] + edges[1:]) / 2
+
+    # density=True already normalises by bin width, so counts IS the pdf
+    return xr, counts
+
+
+def compute_kde_pdf(data, x_min=0, n_points=200, bw_method='scott'):
+    """
+    KDE-based PDF estimate in original space, evaluated on a grid.
+
+    Parameters
+    ----------
+    bw_method : bandwidth selector — 'scott', 'silverman', or a float scalar
+    """
+    data = np.asarray(data)
+    data = data[data >= x_min]
+    # quick hack to do the relcection trick for x vals and not y vals:
+
+    if data.max() > 2.5:
+        data_reflected = np.concatenate([data, 2 * x_min - data])
+        kde = gaussian_kde(data_reflected, bw_method=bw_method)
+
+    else:
+        kde = gaussian_kde(data, bw_method=bw_method)
+    # Evaluate only on x >= x_min and double the density to compensate
+    #pdf_vals = 2 * kde(xr)
+
+    #kde = gaussian_kde(data, bw_method=bw_method)
+
+    # Grid: denser near zero, sparser in the tail
+    xr = np.concatenate([
+        np.linspace(x_min, np.percentile(data, 20), n_points // 2),
+        np.linspace(np.percentile(data, 20), data.max(), n_points // 2)
+    ])
+    xr = np.unique(xr)
+
+    #pdf_vals = kde(xr)
+    if data.max() > 2.5:
+        pdf_vals = 2 * kde(xr)
+    else:
+        pdf_vals = kde(xr)
     return xr, pdf_vals
 
 
-def fit_empirical(data, n_bins=30, x_min=0):
+def fit_empirical(data, n_bins=30, x_min=0, zero_frac=0.3,
+                  use_kde=True, kde_bw='scott', kde_points=200):
+    data = np.asarray(data)
+    data = data[data >= x_min]
+
     # ECDF
     xr_cdf = np.sort(data)
     n = len(xr_cdf)
     cdf_vals_full = np.arange(1, n + 1) / n
     u = np.interp(data, xr_cdf, cdf_vals_full)
 
-    # Histogram PDF
-    xr, pdf_vals = compute_histogram_pdf(data, n_bins=n_bins, x_min=x_min)
+    # PDF
+    if use_kde:
+        xr, pdf_vals = compute_kde_pdf(
+            data, x_min=x_min, n_points=kde_points, bw_method=kde_bw
+        )
+    else:
+        xr, pdf_vals = compute_histogram_pdf(
+            data, n_bins=n_bins, x_min=x_min, zero_frac=zero_frac
+        )
 
-    # Interpolate CDF onto histogram grid so everything shares xr
+    # Interpolate CDF onto the PDF grid
     cdf_vals = np.interp(xr, xr_cdf, cdf_vals_full, left=0, right=1)
 
     params = dict(x_min=xr[0], x_max=xr[-1])
