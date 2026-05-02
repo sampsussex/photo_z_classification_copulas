@@ -237,6 +237,30 @@ def fit_single_gauss(data):
     return u, xr, pdf_vals, cdf_vals, params
 
 
+def fit_single_gennorm(data):
+    """
+    Fit a single generalized normal PDF to `data` via MLE.
+
+    Returns
+    -------
+    u        : uniform [0,1] marginals
+    xr       : evaluation grid
+    pdf_vals : PDF evaluated on xr
+    cdf_vals : CDF evaluated on xr
+    params   : dict with beta, loc, scale
+    """
+    beta, loc, scale = stats.gennorm.fit(data)
+    # stats.gennorm.pdf(x, beta, loc=gnorm_loc, scale=gnorm_scale)
+
+    xr       = np.linspace(data.min() - 0.5, data.max() + 0.5, 10000)
+    pdf_vals = stats.gennorm.pdf(xr, beta, loc=loc, scale=scale)
+    cdf_vals = pdf_to_cdf(xr, pdf_vals)
+    u        = cdf_transform(data, xr, cdf_vals)
+
+    params = dict(beta=beta, loc=loc, scale=scale)
+    return u, xr, pdf_vals, cdf_vals, params
+
+
 def report_fit(label, family, params):
     """Print a one-line summary of a fitted distribution."""
     if family == "linear":
@@ -264,6 +288,9 @@ def report_fit(label, family, params):
               f"N({p['mu2']:.3f}, {p['s2']:.3f})")
     elif family == "single_gauss":
         print(f"{label:25s}  N({params['mu']:.3f}, {params['sigma']:.3f})")
+
+    elif family == "single_gennorm":
+        print(f"{label:25s}  GNorm(beta={params['beta']:.3f}, loc={params['loc']:.3f}, scale={params['scale']:.3f})")
         
 
 def fit_all_marginals(x_all, x_fn, y_all, y_fn):
@@ -292,6 +319,16 @@ def fit_all_marginals(x_all, x_fn, y_all, y_fn):
     # 1. x_all  →  linear PDF
     u, xr, pdf_vals, cdf_vals, params = fit_linear(x_all)
     report_fit("x_all", "linear", params)
+
+    # if u is greater than 1, raise error
+    if np.any(u > 1):
+        raise ValueError("CDF values exceed 1, check fit and interpolation")
+    if np.any(u < 0):
+        raise ValueError("CDF values below 0, check fit and interpolation")
+    
+    # if u or v = 1, set to 0.999 to avoid issues with copula fitting
+    u = np.clip(u, 0.0001, 0.9999)
+    
     results["x_all"] = dict(x=x_all, u=u, xr=xr, pdf_vals=pdf_vals,
                             cdf_vals=cdf_vals, params=params)
 
@@ -303,25 +340,51 @@ def fit_all_marginals(x_all, x_fn, y_all, y_fn):
     
     # 2. x_fn  →  Pareto
     u, xr, pdf_vals, cdf_vals, params = fit_pareto(x_fn)
+        # if u is greater than 1, raise error
+    # if u is greater than 1, raise error
+    if np.any(u > 1):
+        raise ValueError("CDF values exceed 1, check fit and interpolation")
+    if np.any(u < 0):
+        raise ValueError("CDF values below 0, check fit and interpolation")
+    
+    # if u or v = 1, set to 0.999 to avoid issues with copula fitting
+    u = np.clip(u, 0.0001, 0.9999)
+
     report_fit("x_fn", "pareto", params)
     results["x_fn"] = dict(x=x_fn, u=u, xr=xr, pdf_vals=pdf_vals,
                            cdf_vals=cdf_vals, params=params)
 
-    # 3. y_all  →  double Gaussian
-    #u, xr, pdf_vals, cdf_vals, params = fit_double_gauss(y_all)
-    #report_fit("y_all", "double_gauss", params)
-    #results["y_all"] = dict(x=y_all, u=u, xr=xr, pdf_vals=pdf_vals,
-    #                        cdf_vals=cdf_vals, params=params)
-    
+
     # 3. y_all  →  Gaussian + generalised-normal mixture
     u, xr, pdf_vals, cdf_vals, params = fit_gauss_gennorm(y_all)
+    if np.any(u > 1):
+        raise ValueError("CDF values exceed 1, check fit and interpolation")
+    if np.any(u < 0):
+        raise ValueError("CDF values below 0, check fit and interpolation")
+    
+    # if u or v = 1, set to 0.999 to avoid issues with copula fitting
+    u = np.clip(u, 0.0001, 0.9999)
+
+    # 3. y_all  →  Gaussian + generalised-normal mixture
     report_fit("y_all", "gauss_gennorm", params)
     results["y_all"] = dict(x=y_all, u=u, xr=xr, pdf_vals=pdf_vals,
                             cdf_vals=cdf_vals, params=params)
-
+    
     # 4. y_fn  →  single Gaussian
-    u, xr, pdf_vals, cdf_vals, params = fit_single_gauss(y_fn)
-    report_fit("y_fn", "single_gauss", params)
+    #u, xr, pdf_vals, cdf_vals, params = fit_single_gauss(y_fn)
+    u, xr, pdf_vals, cdf_vals, params = fit_single_gennorm(y_fn)
+
+    if np.any(u > 1):
+        raise ValueError("CDF values exceed 1, check fit and interpolation")
+    if np.any(u < 0):
+        raise ValueError("CDF values below 0, check fit and interpolation")
+    
+    # if u or v = 1, set to 0.999 to avoid issues with copula fitting
+    u = np.clip(u, 0.0001, 0.9999)
+
+
+    #report_fit("y_fn", "single_gauss", params)
+    report_fit("y_fn", "single_gennorm", params)
     results["y_fn"] = dict(x=y_fn, u=u, xr=xr, pdf_vals=pdf_vals,
                            cdf_vals=cdf_vals, params=params)
 
@@ -331,7 +394,7 @@ def fit_all_marginals(x_all, x_fn, y_all, y_fn):
 #### EMPIRCAL TRANSFORMS
 
 
-def compute_histogram_pdf(data, n_bins=50, x_min=0, zero_frac=0.3, zero_bins=None):
+def compute_histogram_pdf(data, n_bins):
     """
     Histogram PDF in original space with denser bins near zero.
 
@@ -341,21 +404,12 @@ def compute_histogram_pdf(data, n_bins=50, x_min=0, zero_frac=0.3, zero_bins=Non
     zero_bins  : if set, overrides zero_frac for the number of fine bins near zero
     """
     data = np.asarray(data)
-    data = data[data >= x_min]
+    if np.max(data) > 3.5:
+        bins = np.linspace(0, 6., n_bins)
+    else:
+        bins = np.linspace(0, 2., n_bins)
 
-    # Split point: e.g. 20th percentile, to concentrate bins where density is high
-    p_split = np.percentile(data, 20)
-
-    n_low  = zero_bins if zero_bins is not None else max(2, int(n_bins * zero_frac))
-    n_high = n_bins - n_low
-
-    low_edges  = np.linspace(x_min, p_split, n_low  + 1)
-    high_edges = np.linspace(p_split, data.max(), n_high + 1)
-
-    # Merge, dropping the duplicated boundary point
-    edges = np.concatenate([low_edges, high_edges[1:]])
-
-    counts, edges = np.histogram(data, bins=edges, density=True)
+    counts, edges = np.histogram(data, bins=bins, density=True)
     xr = (edges[:-1] + edges[1:]) / 2
 
     # density=True already normalises by bin width, so counts IS the pdf
@@ -400,7 +454,7 @@ def compute_kde_pdf(data, x_min=0, n_points=200, bw_method='scott'):
     return xr, pdf_vals
 
 
-def fit_empirical(data, n_bins=30, x_min=0, zero_frac=0.3,
+def fit_empirical(data, n_bins=61, x_min=0, zero_frac=0.3,
                   use_kde=True, kde_bw='scott', kde_points=200):
     data = np.asarray(data)
     data = data[data >= x_min]
@@ -418,8 +472,7 @@ def fit_empirical(data, n_bins=30, x_min=0, zero_frac=0.3,
         )
     else:
         xr, pdf_vals = compute_histogram_pdf(
-            data, n_bins=n_bins, x_min=x_min, zero_frac=zero_frac
-        )
+            data, n_bins=n_bins)
 
     # Interpolate CDF onto the PDF grid
     cdf_vals = np.interp(xr, xr_cdf, cdf_vals_full, left=0, right=1)
@@ -506,6 +559,10 @@ def inverse_cdf_single_gauss(u, params):
     return stats.norm.ppf(np.asarray(u), loc=params['mu'], scale=params['sigma'])
 
 
+def inverse_cdf_single_gennorm(u, params):
+    """Analytic inverse (PPF) of a single generalised normal."""
+    return stats.gennorm.ppf(np.asarray(u), beta=params['beta'], loc=params['loc'], scale=params['scale'])
+
 def invert_cdf(u, key, pdf_transformations):
     """
     Dispatch inverse CDF for any key in pdf_transformations.
@@ -515,7 +572,8 @@ def invert_cdf(u, key, pdf_transformations):
     if key == 'x_all':
         return inverse_cdf_linear(u, res['params'])
     elif key == 'y_fn':
-        return inverse_cdf_single_gauss(u, res['params'])
+        #return inverse_cdf_single_gauss(u, res['params'])
+        return inverse_cdf_single_gennorm(u, res['params'])
     else:
         return inverse_cdf_numerical(u, res['xr'], res['cdf_vals'])
 
@@ -543,6 +601,11 @@ def forward_cdf_single_gauss(x, params):
     return stats.norm.cdf(np.asarray(x), loc=params['mu'], scale=params['sigma'])
 
 
+def forward_cdf_single_gennorm(x, params):
+    """Analytic CDF of a single generalised normal."""
+    return stats.gennorm.cdf(np.asarray(x), beta=params['beta'], loc=params['loc'], scale=params['scale'])
+
+
 def forward_cdf(x, key, pdf_transformations, model_type = 'parametric'):
     """
     Dispatch forward CDF for any key in pdf_transformations.
@@ -556,7 +619,8 @@ def forward_cdf(x, key, pdf_transformations, model_type = 'parametric'):
         if key == 'x_all':
             return forward_cdf_linear(x, res['params'])
         elif key == 'y_fn':
-            return forward_cdf_single_gauss(x, res['params'])
+            #return forward_cdf_single_gauss(x, res['params'])
+            return forward_cdf_single_gennorm(x, res['params'])
         else:
             return forward_cdf_numerical(x, res['xr'], res['cdf_vals'])
     elif model_type == 'empirical':
@@ -572,6 +636,15 @@ def density_numerical(x, xr, pdf_vals):
     return np.interp(np.asarray(x), xr, pdf_vals, left=0, right=0)
 
 
+def density_numerical_xs(x, xr, pdf_vals):
+    return np.interp(np.asarray(x), xr, pdf_vals, right=0)
+
+
+def density_numerical_ys(x, xr, pdf_vals):
+    """Interpolate density at x from a precomputed PDF array."""
+    return np.interp(np.asarray(x), xr, pdf_vals, left=0, right=0)
+
+
 def density_linear(x, params):
     """Analytic linear PDF."""
     return np.clip(params['slope'] * np.asarray(x) + params['intercept'], 0, None)
@@ -581,6 +654,10 @@ def density_single_gauss(x, params):
     """Analytic single Gaussian PDF."""
     return stats.norm.pdf(np.asarray(x), loc=params['mu'], scale=params['sigma'])
 
+
+def density_single_gennorm(x, params):
+    """Analytic single generalised normal PDF."""
+    return stats.gennorm.pdf(np.asarray(x), beta=params['beta'], loc=params['loc'], scale=params['scale'])
 
 def empirical_cdf(x):
     """Map data to uniform [0,1] via empirical CDF (rank-based)."""
@@ -599,11 +676,17 @@ def density(x, key, pdf_transformations, model_type='parametric'):
         if key == 'x_all':
             return density_linear(x, res['params'])
         elif key == 'y_fn':
-            return density_single_gauss(x, res['params'])
+            #return density_single_gauss(x, res['params'])
+            return density_single_gennorm(x, res['params'])
         else:
             return density_numerical(x, res['xr'], res['pdf_vals'])
+        
+
     elif model_type == 'empirical':
-        return density_numerical(x, res['xr'], res['pdf_vals'])
+        if key in ['x_all', 'x_fn']:
+            return density_numerical_xs(x, res['xr'], res['pdf_vals'])
+        elif key in ['y_all', 'y_fn']:
+            return density_numerical_ys(x, res['xr'], res['pdf_vals'])
 
 
 def xy2xy_parameteric_cdf_transform(xy, pdf_transformations):
