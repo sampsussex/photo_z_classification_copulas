@@ -10,14 +10,16 @@ from probability_funcs import forward_cdf, density, xy2xy_parameteric_cdf_transf
 
 
 
-def train_copulas_empirical(uv_all, uv_fn, make_plots=False):
+def train_copulas_empirical(uv_all, uv_fn, uv_tp, make_plots=False):
 
     controls_np = pv.FitControlsBicop(family_set=[pv.BicopFamily.tll])
     cop_np_all = pv.Bicop.from_data(data=uv_all, controls=controls_np)
     cop_np_fn  = pv.Bicop.from_data(data=uv_fn,  controls=controls_np)
+    cop_np_tp  = pv.Bicop.from_data(data=uv_tp,  controls=controls_np)
     print('Empirical TLL copula fits:')
     print(f'All: {cop_np_all}')
     print(f'FN: {cop_np_fn}')
+    print(f'TP: {cop_np_tp}')
 
     if make_plots:
         print('All Fits...')
@@ -30,13 +32,19 @@ def train_copulas_empirical(uv_all, uv_fn, make_plots=False):
         cop_np_fn.plot(type="contour", margin_type="unif")
         print(f'FN AIC: {cop_np_fn.aic()}')
         print(f'FN loglik: {cop_np_fn.loglik()}')
+        print('TP Fits...')
+        cop_np_tp.plot()
+        cop_np_tp.plot(type="contour", margin_type="unif")
 
-    return cop_np_all, cop_np_fn
+
+    return cop_np_all, cop_np_fn, cop_np_tp
 
 
-def train_copulas_parametric(uv_all, uv_fn, make_plots=False, 
+def train_copulas_parametric(uv_all, uv_fn, uv_tp,
+                             make_plots=False, 
                              twocomponent_mixture_all= False, fam1_copula_all = pv.BicopFamily.bb8, fam2_copula_all = pv.BicopFamily.tawn,
-                             twocomponent_mixture_fn=False, fam1_copula_fn=pv.BicopFamily.joe, fam2_copula_fn=pv.BicopFamily.tawn):
+                             twocomponent_mixture_fn=False, fam1_copula_fn=pv.BicopFamily.joe, fam2_copula_fn=pv.BicopFamily.tawn, 
+                             twocomponent_mixture_tp=False, fam1_copula_tp=pv.BicopFamily.joe, fam2_copula_tp=pv.BicopFamily.tawn):
     """Fit parametric copula models to the "all" and "fn" datasets.
     For "all", we fit a single parametric copula, selecting the best family and rotation by AIC.
     For "fn", we fit either a single parametric copula (selecting by AIC) or a two-component mixture of copulas (selecting by AIC).
@@ -60,8 +68,9 @@ def train_copulas_parametric(uv_all, uv_fn, make_plots=False,
         cop_all: fitted pyvinecopulib Bicop model for the "all" dataset
         cop_fn: fitted pyvinecopulib Bicop model (or TwoComponentVinecopulibMixture) for the "fn" dataset
     """ 
-    controls_fn = pv.FitControlsBicop(family_set=[pv.BicopFamily.student], allow_rotations=True)# pv.parametric
-    controls_all = pv.FitControlsBicop(family_set=[pv.BicopFamily.tawn], allow_rotations=True) #pv.parametric
+    controls_fn = pv.FitControlsBicop(family_set=pv.parametric, allow_rotations=True)# pv.parametric
+    controls_all = pv.FitControlsBicop(family_set=pv.parametric, allow_rotations=True) #pv.parametric
+    controls_tp = pv.FitControlsBicop(family_set=pv.parametric, allow_rotations=True) #pv.parametric
 
     if twocomponent_mixture_all:
         cop_all = ThreeComponentVinecopulibMixture(family1=fam1_copula_all, family2=fam2_copula_all)
@@ -78,9 +87,16 @@ def train_copulas_parametric(uv_all, uv_fn, make_plots=False,
     else:
         cop_fn  = pv.Bicop.from_data(data=uv_fn,  controls=controls_fn)
 
+    if twocomponent_mixture_tp:
+        cop_tp = ThreeComponentVinecopulibMixture(family1=fam1_copula_tp, family2=fam2_copula_tp)
+        cop_tp.fit(uv_tp)
+    else:
+        cop_tp  = pv.Bicop.from_data(data=uv_tp,  controls=controls_tp)
+
     print('Parametric copula fits:')
     print(f'All: {cop_all}')
     print(f'FN: {cop_fn}')
+    print(f'TP: {cop_tp}')
     if make_plots:
         print('All Fits...')
         if twocomponent_mixture_all:
@@ -90,8 +106,6 @@ def train_copulas_parametric(uv_all, uv_fn, make_plots=False,
             cop_all.plot()
         print(f'All AIC: {cop_all.aic()}')
         print(f'All loglik: {cop_all.loglik()}')
-
-
 
         print('FN Fits...')
 
@@ -104,10 +118,19 @@ def train_copulas_parametric(uv_all, uv_fn, make_plots=False,
         print(f'FN AIC: {cop_fn.aic()}')
         print(f'FN loglik: {cop_fn.loglik()}')
 
-    return cop_all, cop_fn
+        print('TP Fits...')
+        if twocomponent_mixture_tp:
+            cop_tp.plot(plot_type="heatmap", margin_type="unif")
+        else:
+            cop_tp.plot(type="contour", margin_type="unif")
+            cop_tp.plot()
+        print(f'TP AIC: {cop_tp.aic()}')
+        print(f'TP loglik: {cop_tp.loglik()}')
+
+    return cop_all, cop_fn, cop_tp
 
 
-def get_completeness(xy_input, copula_all, copula_fn, pi_fn, pdf_transformations, apply_xy2xy_transform=False, cdf_type='parametric', mapping_type='parametric'):
+def get_completeness(xy_input, copula_all, copula_fn, copula_tp, pi_fn, pdf_transformations, apply_xy2xy_transform=False, cdf_type='parametric', mapping_type='parametric'):
     """
     Compute completeness for the input data using the trained copula models and marginal transformations.
     Parameters
@@ -116,6 +139,7 @@ def get_completeness(xy_input, copula_all, copula_fn, pi_fn, pdf_transformations
             The input data points for which to compute completeness, in the original (x,y) space
         copula_all: fitted copula pyvinecopulib model for the "all" dataset"
         copula_fn: fitted copula pyvinecopulib model for the "fn" dataset
+        copula_tp: fitted copula pyvinecopulib model for the "tp" dataset
         pi_fn: scaling value for the "fn" dataset (scalar)
         pdf_transformations: dict containing the fitted marginal transformations for x and y, e.g. as returned by fit_all_marginals()
         apply_xy2xy_transform: whether to apply the xy2xy transform to the input data before computing completeness
@@ -151,20 +175,30 @@ def get_completeness(xy_input, copula_all, copula_fn, pi_fn, pdf_transformations
     v_input_fn = forward_cdf(xy_input[:,1], 'y_fn', pdf_transformations, model_type=cdf_type)
     uv_input_fn = np.column_stack((u_input_fn, v_input_fn))
 
-    u_all = copula_all.pdf(uv_input_all)
-    u_fn = copula_fn.pdf(uv_input_fn)
+    u_input_tp = forward_cdf(xy_input[:,0], 'x_tp', pdf_transformations, model_type=cdf_type)
+    v_input_tp = forward_cdf(xy_input[:,1], 'y_tp', pdf_transformations, model_type=cdf_type)
+    uv_input_tp = np.column_stack((u_input_tp, v_input_tp))
+
+    c_all = copula_all.pdf(uv_input_all)
+    c_fn = copula_fn.pdf(uv_input_fn)
+    c_tp = copula_tp.pdf(uv_input_tp)
 
     den_x_all = density(xy_input[:, 0], 'x_all', pdf_transformations, model_type=cdf_type)
     den_x_fn = density(xy_input[:, 0], 'x_fn', pdf_transformations, model_type=cdf_type)
+    den_x_tp = density(xy_input[:, 0], 'x_tp', pdf_transformations, model_type=cdf_type)
 
     den_y_all = density(xy_input[:, 1], 'y_all', pdf_transformations, model_type=cdf_type)
     den_y_fn = density(xy_input[:, 1], 'y_fn', pdf_transformations, model_type=cdf_type)
+    den_y_tp = density(xy_input[:, 1], 'y_tp', pdf_transformations, model_type=cdf_type)
 
-    den_fn = u_fn * den_x_fn * den_y_fn
-    den_all = u_all * den_x_all * den_y_all
+
+    den_fn = c_fn * den_x_fn * den_y_fn
+    den_all = c_all * den_x_all * den_y_all
+    den_tp = c_tp * den_x_tp * den_y_tp
     # Compute densities at the recovered points
 
-    completeness = 1 - den_fn * pi_fn  / (den_all + 1e-12)
+    #completeness = 1 - den_fn * pi_fn  / (den_all + 1e-12)
+    completeness = (1-pi_fn) * den_tp / (den_all + 1e-12)
     # Clip completeness to [0,1]
     completeness = np.clip(completeness, 0, 1)
     return completeness

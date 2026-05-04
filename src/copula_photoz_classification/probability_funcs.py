@@ -293,7 +293,7 @@ def report_fit(label, family, params):
         print(f"{label:25s}  GNorm(beta={params['beta']:.3f}, loc={params['loc']:.3f}, scale={params['scale']:.3f})")
         
 
-def fit_all_marginals(x_all, x_fn, y_all, y_fn):
+def fit_all_marginals(x_all, x_fn, y_all, y_fn, x_tp, y_tp):
     """
     Fit parametric marginal distributions to each variable/subset pair
     and return uniform [0,1] transforms alongside fit diagnostics.
@@ -304,6 +304,8 @@ def fit_all_marginals(x_all, x_fn, y_all, y_fn):
     x_fn  : array  –  magnitude for false-negative subset
     y_all : array  –  g−i colour for all objects
     y_fn  : array  –  g−i colour for false-negative subset
+    x_tp  : array  –  magnitude for true-positive subset
+    y_tp  : array  –  g−i colour for true-positive subset
 
     Returns
     -------
@@ -327,7 +329,7 @@ def fit_all_marginals(x_all, x_fn, y_all, y_fn):
         raise ValueError("CDF values below 0, check fit and interpolation")
     
     # if u or v = 1, set to 0.999 to avoid issues with copula fitting
-    u = np.clip(u, 0.0001, 0.9999)
+    u = np.clip(u, 0.00001, 0.99999)
     
     results["x_all"] = dict(x=x_all, u=u, xr=xr, pdf_vals=pdf_vals,
                             cdf_vals=cdf_vals, params=params)
@@ -387,6 +389,33 @@ def fit_all_marginals(x_all, x_fn, y_all, y_fn):
     report_fit("y_fn", "single_gennorm", params)
     results["y_fn"] = dict(x=y_fn, u=u, xr=xr, pdf_vals=pdf_vals,
                            cdf_vals=cdf_vals, params=params)
+    
+
+    # 5. x_tp  →  linear PDF
+    u, xr, pdf_vals, cdf_vals, params = fit_linear(x_tp)
+
+    if np.any(u > 1):
+        raise ValueError("CDF values exceed 1, check fit and interpolation")
+    if np.any(u < 0):
+        raise ValueError("CDF values below 0, check fit and interpolation")
+    # if u or v = 1, set to 0.999 to avoid issues with copula fitting
+    u = np.clip(u, 0.0001, 0.9999)
+    report_fit("x_tp", "linear", params)
+    results["x_tp"] = dict(x=x_tp, u=u, xr=xr, pdf_vals=pdf_vals,
+                            cdf_vals=cdf_vals, params=params)
+    
+    # 6. y_tp  →  Gaussian + generalised-normal mixture
+    u, xr, pdf_vals, cdf_vals, params = fit_gauss_gennorm(y_tp)
+    if np.any(u > 1):
+        raise ValueError("CDF values exceed 1, check fit and interpolation")
+    if np.any(u < 0):
+        raise ValueError("CDF values below 0, check fit and interpolation")
+    # if u or v = 1, set to 0.999 to avoid issues with copula fitting
+    u = np.clip(u, 0.0001, 0.9999)
+    report_fit("y_tp", "gauss_gennorm", params)
+    results["y_tp"] = dict(x=y_tp, u=u, xr=xr, pdf_vals=pdf_vals,
+                            cdf_vals=cdf_vals, params=params)
+
 
     return results
 
@@ -482,7 +511,7 @@ def fit_empirical(data, n_bins=61, x_min=0, zero_frac=0.3,
 
 
 
-def fit_all_marginals_empirical(x_all, x_fn, y_all, y_fn):
+def fit_all_marginals_empirical(x_all, x_fn, y_all, y_fn, x_tp, y_tp):
     """
     Compute empirical marginal CDFs for each variable/subset pair
     and return uniform [0,1] transforms.
@@ -493,6 +522,8 @@ def fit_all_marginals_empirical(x_all, x_fn, y_all, y_fn):
     x_fn  : array  –  magnitude for false-negative subset
     y_all : array  –  g−i colour for all objects
     y_fn  : array  –  g−i colour for false-negative subset
+    x_tp  : array  –  magnitude for true-positive subset
+    y_tp  : array  –  g−i colour for true-positive subset
 
     Returns
     -------
@@ -505,8 +536,8 @@ def fit_all_marginals_empirical(x_all, x_fn, y_all, y_fn):
     """
     results = {}
 
-    for label, data in [("x_all", x_all), ("x_fn", x_fn),
-                        ("y_all", y_all), ("y_fn",  y_fn)]:
+    for label, data in [("x_all", x_all), ("x_fn", x_fn), ("x_tp", x_tp),
+                        ("y_all", y_all), ("y_fn",  y_fn), ("y_tp", y_tp)]:
         u, xr, pdf_vals, cdf_vals, params = fit_empirical(data)
         print(f"{label:25s}  empirical ECDF  "
               f"[{params['x_min']:.3f}, {params['x_max']:.3f}]  "
@@ -618,9 +649,13 @@ def forward_cdf(x, key, pdf_transformations, model_type = 'parametric'):
     if model_type == 'parametric':
         if key == 'x_all':
             return forward_cdf_linear(x, res['params'])
+        elif key == 'x_tp':
+            return forward_cdf_linear(x, res['params'])
         elif key == 'y_fn':
             #return forward_cdf_single_gauss(x, res['params'])
             return forward_cdf_single_gennorm(x, res['params'])
+        elif key == 'y_tp':
+            return forward_cdf_single_gauss(x, res['params'])
         else:
             return forward_cdf_numerical(x, res['xr'], res['cdf_vals'])
     elif model_type == 'empirical':

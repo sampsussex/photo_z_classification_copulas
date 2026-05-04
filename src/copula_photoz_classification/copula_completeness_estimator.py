@@ -56,34 +56,37 @@ class CopulaCompletenessEstimator:
     def train_copula_model(self, make_plots=True):
         
         self.xy_not_training_set = False
-        self.xy_fn_training = self.xy_fn
 
-        x_all, x_fn = self.xy_input[:, 0], self.xy_fn_training[:, 0]
-        y_all, y_fn = self.xy_input[:, 1], self.xy_fn_training[:, 1]
+        x_all, x_fn, x_tp = self.xy_input[:, 0], self.xy_fn[:, 0], self.xy_tp[:, 0]
+        y_all, y_fn, y_tp = self.xy_input[:, 1], self.xy_fn[:, 1], self.xy_tp[:, 1]
 
         if self.cdf_type == 'parametric':
-            self.pdf_transformations = fit_all_marginals(x_all, x_fn, y_all, y_fn)
+            self.pdf_transformations = fit_all_marginals(x_all, x_fn, y_all, y_fn, x_tp, y_tp)
 
 
         if self.cdf_type == 'empirical':
-            self.pdf_transformations = fit_all_marginals_empirical(x_all, x_fn, y_all, y_fn)
+            self.pdf_transformations = fit_all_marginals_empirical(x_all, x_fn, y_all, y_fn, x_tp, y_tp)
 
         if make_plots:
-            data_map    = {"x_all": x_all, "x_fn": x_fn, "y_all": y_all, "y_fn": y_fn}
+            data_map    = {"x_all": x_all, "x_fn": x_fn, "y_all": y_all, "y_fn": y_fn, "x_tp": x_tp, "y_tp": y_tp}
             plot_marginal_fits(self.pdf_transformations, data_map)
 
         self.u_all = self.pdf_transformations['x_all']['u']
         self.v_all = self.pdf_transformations['y_all']['u']
         self.u_fn = self.pdf_transformations['x_fn']['u']
         self.v_fn = self.pdf_transformations['y_fn']['u']
+        self.u_tp = self.pdf_transformations['x_tp']['u']
+        self.v_tp = self.pdf_transformations['y_tp']['u']
+
         self.uv_all = np.column_stack((self.u_all, self.v_all))
         self.uv_fn = np.column_stack((self.u_fn, self.v_fn))
+        self.uv_tp = np.column_stack((self.u_tp, self.v_tp))
         
 
 
         if self.copula_type == 'parametric':
-            self.copula_all, self.copula_fn = train_copulas_parametric(
-                self.uv_all, self.uv_fn,
+            self.copula_all, self.copula_fn, self.copula_tp = train_copulas_parametric(
+                self.uv_all, self.uv_fn, self.uv_tp,
                 make_plots=make_plots,
                 twocomponent_mixture_all=self.twocomponent_mixture_all,
                 fam1_copula_all=self.fam1_copula_all,
@@ -95,8 +98,8 @@ class CopulaCompletenessEstimator:
 
 
         elif self.copula_type == 'empirical':
-            self.copula_all, self.copula_fn = train_copulas_empirical(
-                self.uv_all, self.uv_fn,
+            self.copula_all, self.copula_fn, self.copula_tp = train_copulas_empirical(
+                self.uv_all, self.uv_fn, self.uv_tp,
                 make_plots=make_plots
             )
         
@@ -106,17 +109,18 @@ class CopulaCompletenessEstimator:
         pickle.dump(self.copula_all, open(path + '_all.pkl', 'wb'))
         pickle.dump(self.pdf_transformations, open(path + '_pdf_transforms.pkl', 'wb'))
         pickle.dump(self.pi_fn, open(path + '_pi_fn.pkl', 'wb'))
-
+        pickle.dump(self.pi_tp, open(path + '_pi_tp.pkl', 'wb'))
 
     def load_copula_model(self, path):
         self.copula_fn = pickle.load(open(path + '_fn.pkl', 'rb'))
         self.copula_all = pickle.load(open(path + '_all.pkl', 'rb'))
         self.pdf_transformations = pickle.load(open(path + '_pdf_transforms.pkl', 'rb'))
         self.pi_fn = pickle.load(open(path + '_pi_fn.pkl', 'rb'))
-
+        self.pi_tp = pickle.load(open(path + '_pi_tp.pkl', 'rb'))
 
     def find_completeness(self):
-        self.completeness = get_completeness(self.xy_input, self.copula_all, self.copula_fn, 
+        self.completeness = get_completeness(self.xy_input, self.copula_all, self.copula_fn,
+                                             self.copula_tp,
                                              self.pi_fn, self.pdf_transformations, 
                                              apply_xy2xy_transform=self.xy_not_training_set, 
                                              cdf_type=self.cdf_type, mapping_type=self.mapping_type)
@@ -143,6 +147,8 @@ class CopulaCompletenessEstimator:
     def set_xy_fn_mask(self, xy_true_positive_mask):
         self.xy_tp_mask = xy_true_positive_mask
         self.xy_fn = self.xy_input[~xy_true_positive_mask]
+        self.xy_tp = self.xy_input[xy_true_positive_mask]
         self.pi_fn = len(self.xy_fn) / len(self.xy_input)
+        self.pi_tp = len(self.xy_tp) / len(self.xy_input)
 
 
