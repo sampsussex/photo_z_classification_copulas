@@ -130,7 +130,7 @@ def plot_marginal_fits(results, data_map, save_path="all_fits_marginals.png"):
 def _plot_fit(ax, data, xr, pdf_vals, title):
     """Col 0: histogram of data overlaid with fitted PDF."""
     ax.hist(data, bins=30, density=True, alpha=0.5, color="steelblue")
-    #ax.plot(xr, pdf_vals, "r-", lw=2)
+    ax.plot(xr, pdf_vals, "r-", lw=2)
     ax.set(title=title, ylabel="density")
 
 

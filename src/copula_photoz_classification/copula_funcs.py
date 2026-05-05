@@ -60,11 +60,11 @@ def train_copulas_parametric(uv_all, uv_fn, make_plots=False,
         cop_all: fitted pyvinecopulib Bicop model for the "all" dataset
         cop_fn: fitted pyvinecopulib Bicop model (or TwoComponentVinecopulibMixture) for the "fn" dataset
     """ 
-    controls_fn = pv.FitControlsBicop(family_set=[pv.BicopFamily.student], allow_rotations=True)# pv.parametric
-    controls_all = pv.FitControlsBicop(family_set=[pv.BicopFamily.tawn], allow_rotations=True) #pv.parametric
+    controls_fn = pv.FitControlsBicop(family_set=[pv.BicopFamily.bb8], allow_rotations=True)# pv.parametric
+    controls_all = pv.FitControlsBicop(family_set=[pv.BicopFamily.bb8], allow_rotations=True) #pv.parametric
 
     if twocomponent_mixture_all:
-        cop_all = ThreeComponentVinecopulibMixture(family1=fam1_copula_all, family2=fam2_copula_all)
+        cop_all = TwoComponentVinecopulibMixture(family1=fam1_copula_all, family2=fam2_copula_all)
         cop_all.fit(uv_all)
 
     else:
@@ -73,7 +73,7 @@ def train_copulas_parametric(uv_all, uv_fn, make_plots=False,
 
     if twocomponent_mixture_fn:
         #cop_fn = TwoComponentVinecopulibMixture(family1=fam1_copula_fn, family2=fam2_copula_fn)
-        cop_fn = ThreeComponentVinecopulibMixture(family1=fam1_copula_fn, family2=fam2_copula_fn)
+        cop_fn = TwoComponentVinecopulibMixture(family1=fam1_copula_fn, family2=fam2_copula_fn)
         cop_fn.fit(uv_fn)
     else:
         cop_fn  = pv.Bicop.from_data(data=uv_fn,  controls=controls_fn)
