@@ -46,7 +46,6 @@ def cdf_transform(data, xr, cdf_vals):
 # ════════════════════════════════════════════════════════════════════════════════
 
 
-
 def fit_pareto(data, n_bins=30):
     """
     Fit a Pareto PDF to `data` via MLE.
@@ -70,10 +69,38 @@ def fit_pareto(data, n_bins=30):
     return u, xr, pdf_vals, cdf_vals, params
 
 
+def fit_laplace(data):
+    """
+    Fit a Laplace PDF to `data` via MLE.
+
+    Returns
+    -------
+    u        : uniform [0,1] marginals
+    xr       : evaluation grid
+    pdf_vals : PDF evaluated on xr
+    cdf_vals : CDF evaluated on xr
+    params   : dict with loc, scale
+    """
+    loc, scale = stats.laplace.fit(data)
+
+    xr       = np.linspace(data.min() - 0.5, data.max() + 0.5, 10000)
+    pdf_vals = stats.laplace.pdf(xr, loc=loc, scale=scale)
+    cdf_vals = pdf_to_cdf(xr, pdf_vals)
+    u        = cdf_transform(data, xr, cdf_vals)
+
+    params = dict(loc=loc, scale=scale)
+    return u, xr, pdf_vals, cdf_vals, params
+
+
 def gauss_gennorm(x, w, mu, sigma, beta, gnorm_loc, gnorm_scale):
     """Gaussian + generalised-normal mixture PDF."""
     return (w       * stats.norm.pdf(x, mu, sigma) +
             (1 - w) * stats.gennorm.pdf(x, beta, loc=gnorm_loc, scale=gnorm_scale))
+
+def double_gennorm(x, w, beta1, loc1, scale1, beta2, loc2, scale2):
+    """Two-component generalised-normal mixture PDF."""
+    return (w       * stats.gennorm.pdf(x, beta1, loc=loc1, scale=scale1) +
+            (1 - w) * stats.gennorm.pdf(x, beta2, loc=loc2, scale=scale2))
 
 
 def fit_gauss_gennorm(data, n_bins=30):
@@ -181,36 +208,51 @@ def fit_linear_gauss(data, n_bins=30):
     return u, xr, pdf_vals, cdf_vals, params
 
 
-def fit_double_gauss(data, n_bins=30):
+def fit_double_gauss(data, n_bins=50, fixed_locs=None):
     """
     Fit a two-component Gaussian mixture PDF to `data`.
 
-    Returns
-    -------
-    u        : uniform [0,1] marginals
-    xr       : evaluation grid
-    pdf_vals : PDF evaluated on xr
-    cdf_vals : CDF evaluated on xr
-    params   : dict with w, mu1, s1, mu2, s2
+    Parameters
+    ----------
+    fixed_locs : tuple (mu1, mu2) or None
+        If provided, mu1 and mu2 are held fixed and not optimised.
     """
     counts, edges = np.histogram(data, bins=n_bins, density=True)
     bc = (edges[:-1] + edges[1:]) / 2
 
-    p0     = [0.5, data.mean() - 0.5, data.std() * 0.5,
-                   data.mean() + 0.5, data.std() * 0.5]
-    bounds = ([0, -10, 0.01, -10, 0.01],
-              [1,  10,    5,  10,    5])
+    if fixed_locs is not None:
+        mu1_fixed, mu2_fixed = fixed_locs
 
-    popt, _ = curve_fit(double_gauss, bc, counts, p0=p0,
-                        bounds=bounds, maxfev=20_000)
-    w, mu1, s1, mu2, s2 = popt
+        def double_gauss_fixed(x, w, s1, s2):
+            return double_gauss(x, w, mu1_fixed, s1, mu2_fixed, s2)
 
-    xr       = np.linspace(data.min() - 0.5, data.max() + 0.5, 10000)
-    pdf_vals = double_gauss(xr, *popt)
+        p0     = [0.5, data.std() * 0.5, data.std() * 0.5]
+        bounds = ([0,   0.01, 0.01],
+                  [1,   5,    5   ])
+
+        popt, _ = curve_fit(double_gauss_fixed, bc, counts, p0=p0,
+                            bounds=bounds, maxfev=20_000)
+        w, s1, s2 = popt
+        mu1, mu2  = mu1_fixed, mu2_fixed
+
+    else:
+        p0     = [0.5, data.mean() - 0.5, data.std() * 0.5,
+                       data.mean() + 0.5, data.std() * 0.5]
+        bounds = ([0,  -10, 0.01, -10, 0.01],
+                  [1,   10,    5,  10,    5 ])
+
+        popt, _ = curve_fit(double_gauss, bc, counts, p0=p0,
+                            bounds=bounds, maxfev=20_000)
+        w, mu1, s1, mu2, s2 = popt
+
+    full_popt = (w, mu1, s1, mu2, s2)
+
+    xr       = np.linspace(data.min() - 0.5, data.max() + 0.5, 10_000)
+    pdf_vals = double_gauss(xr, *full_popt)
     cdf_vals = pdf_to_cdf(xr, pdf_vals)
     u        = cdf_transform(data, xr, cdf_vals)
+    params   = dict(w=w, mu1=mu1, s1=s1, mu2=mu2, s2=s2)
 
-    params = dict(w=w, mu1=mu1, s1=s1, mu2=mu2, s2=s2)
     return u, xr, pdf_vals, cdf_vals, params
 
 
@@ -261,10 +303,112 @@ def fit_single_gennorm(data):
     return u, xr, pdf_vals, cdf_vals, params
 
 
+def fit_double_gennorm(data, n_bins=30, fixed_locs=None):
+    """
+    Fit a two-component generalised-normal mixture PDF to `data`.
+
+    Parameters
+    ----------
+    fixed_locs : tuple (loc1, loc2) or None
+        If provided, loc1 and loc2 are held fixed at these values
+        and not included in the optimisation.
+    """
+    counts, edges = np.histogram(data, bins=n_bins, density=True)
+    bc = (edges[:-1] + edges[1:]) / 2
+
+    if fixed_locs is not None:
+        loc1_fixed, loc2_fixed = fixed_locs
+
+        # Wrapper that injects the fixed locs so curve_fit only sees 5 params
+        def double_gennorm_fixed(x, w, beta1, scale1, beta2, scale2):
+            return double_gennorm(x, w, beta1, loc1_fixed, scale1,
+                                     beta2, loc2_fixed, scale2)
+
+        p0     = [0.5, 1.0, data.std() * 0.5,
+                       1.0, data.std() * 0.5]
+        bounds = ([0,   0.1, 0.01, 0.1, 0.01],
+                  [1,  10,   5,   10,   5  ])
+
+        popt, _ = curve_fit(double_gennorm_fixed, bc, counts, p0=p0,
+                            bounds=bounds, maxfev=20_000)
+        w, beta1, scale1, beta2, scale2 = popt
+        loc1, loc2 = loc1_fixed, loc2_fixed
+
+    else:
+        p0     = [0.5, 1.0, data.mean() - 0.5, data.std() * 0.5,
+                       1.0, data.mean() + 0.5, data.std() * 0.5]
+        bounds = ([0,   0.1, -10, 0.01, 0.1, -10, 0.01],
+                  [1,  10,   10,    5,  10,  10,    5  ])
+
+        popt, _ = curve_fit(double_gennorm, bc, counts, p0=p0,
+                            bounds=bounds, maxfev=20_000)
+        w, beta1, loc1, scale1, beta2, loc2, scale2 = popt
+
+    # Reconstruct full popt tuple for pdf/cdf evaluation
+    full_popt = (w, beta1, loc1, scale1, beta2, loc2, scale2)
+
+    xr       = np.linspace(data.min() - 0.5, data.max() + 0.5, 10_000)
+    pdf_vals = double_gennorm(xr, *full_popt)
+    cdf_vals = pdf_to_cdf(xr, pdf_vals)
+    u        = cdf_transform(data, xr, cdf_vals)
+    params   = dict(w=w, beta1=beta1, loc1=loc1, scale1=scale1,
+                        beta2=beta2, loc2=loc2, scale2=scale2)
+
+    return u, xr, pdf_vals, cdf_vals, params
+
+
+def fit_exponweib(data):
+    """
+    Fit an Exponentiated Weibull PDF to `data` via MLE.
+
+    Returns
+    -------
+    u        : uniform [0,1] marginals
+    xr       : evaluation grid
+    pdf_vals : PDF evaluated on xr
+    cdf_vals : CDF evaluated on xr
+    params   : dict with a, c, loc, scale
+    """
+    a, c, loc, scale = stats.exponweib.fit(data)
+
+    xr       = np.linspace(0, data.max() + 0.5, 10000)
+    pdf_vals = stats.exponweib.pdf(xr, a, c, loc=loc, scale=scale)
+    cdf_vals = pdf_to_cdf(xr, pdf_vals)
+    u        = cdf_transform(data, xr, cdf_vals)
+
+    params = dict(a=a, c=c, loc=loc, scale=scale)
+    return u, xr, pdf_vals, cdf_vals, params
+
+
+def fit_moyal(data):
+    """
+    Fit a Moyal PDF to `data` via MLE.
+
+    Returns
+    -------
+    u        : uniform [0,1] marginals
+    xr       : evaluation grid
+    pdf_vals : PDF evaluated on xr
+    cdf_vals : CDF evaluated on xr
+    params   : dict with loc, scale
+    """
+    loc, scale = stats.moyal.fit(data)
+
+    xr       = np.linspace(data.min() - 0.5, data.max() + 0.5, 10000)
+    pdf_vals = stats.moyal.pdf(xr, loc=loc, scale=scale)
+    cdf_vals = pdf_to_cdf(xr, pdf_vals)
+    u        = cdf_transform(data, xr, cdf_vals)
+
+    params = dict(loc=loc, scale=scale)
+    return u, xr, pdf_vals, cdf_vals, params
+
+
 def report_fit(label, family, params):
     """Print a one-line summary of a fitted distribution."""
+
     if family == "linear":
         print(f"{label:25s}  linear({params['slope']:.3f}x + {params['intercept']:.3f})")
+
     elif family == "linear_gauss":
         p = params
         print(f"{label:25s}  w={p['w']:.3f}  "
@@ -286,12 +430,29 @@ def report_fit(label, family, params):
         print(f"{label:25s}  w={p['w']:.3f}  "
               f"N({p['mu1']:.3f}, {p['s1']:.3f})  "
               f"N({p['mu2']:.3f}, {p['s2']:.3f})")
+        
     elif family == "single_gauss":
         print(f"{label:25s}  N({params['mu']:.3f}, {params['sigma']:.3f})")
 
     elif family == "single_gennorm":
         print(f"{label:25s}  GNorm(beta={params['beta']:.3f}, loc={params['loc']:.3f}, scale={params['scale']:.3f})")
+
+    elif family == "exponweib":
+        print(f"{label:25s}  ExponWeib(a={params['a']:.3f}, c={params['c']:.3f}, loc={params['loc']:.3f}, scale={params['scale']:.3f})")
+
+    elif family == "moyal":
+        print(f"{label:25s}  Moyal(loc={params['loc']:.3f}, scale={params['scale']:.3f})")
+
+    elif family == "double_gennorm":
+        p = params
+        print(f"{label:25s}  w={p['w']:.3f}  "
+              f"GNorm(beta={p['beta1']:.3f}, loc={p['loc1']:.3f}, scale={p['scale1']:.3f})  "
+              f"GNorm(beta={p['beta2']:.3f}, loc={p['loc2']:.3f}, scale={p['scale2']:.3f})")
         
+    elif family == "laplace":
+        print(f"{label:25s}  Laplace(loc={params['loc']:.3f}, scale={params['scale']:.3f})")
+
+    
 
 def fit_all_marginals(x_all, x_fn, y_all, y_fn):
     """
@@ -315,10 +476,14 @@ def fit_all_marginals(x_all, x_fn, y_all, y_fn):
         'params'   – fitted parameters
     """
     results = {}
+    upper_clip = 1 -1e-10
 
+    lower_clip = 1e-10
     # 1. x_all  →  linear PDF
-    u, xr, pdf_vals, cdf_vals, params = fit_linear(x_all)
-    report_fit("x_all", "linear", params)
+    #u, xr, pdf_vals, cdf_vals, params = fit_linear(x_all)
+    #report_fit("x_all", "linear", params)
+    u, xr, pdf_vals, cdf_vals, params = fit_exponweib(x_all)
+    report_fit("x_all", "exponweib", params)
 
     # if u is greater than 1, raise error
     if np.any(u > 1):
@@ -327,7 +492,7 @@ def fit_all_marginals(x_all, x_fn, y_all, y_fn):
         raise ValueError("CDF values below 0, check fit and interpolation")
     
     # if u or v = 1, set to 0.999 to avoid issues with copula fitting
-    u = np.clip(u, 0.0001, 0.9999)
+    u = np.clip(u, lower_clip, upper_clip)
     
     results["x_all"] = dict(x=x_all, u=u, xr=xr, pdf_vals=pdf_vals,
                             cdf_vals=cdf_vals, params=params)
@@ -348,7 +513,7 @@ def fit_all_marginals(x_all, x_fn, y_all, y_fn):
         raise ValueError("CDF values below 0, check fit and interpolation")
     
     # if u or v = 1, set to 0.999 to avoid issues with copula fitting
-    u = np.clip(u, 0.0001, 0.9999)
+    u = np.clip(u, lower_clip, upper_clip)
 
     report_fit("x_fn", "pareto", params)
     results["x_fn"] = dict(x=x_fn, u=u, xr=xr, pdf_vals=pdf_vals,
@@ -356,35 +521,35 @@ def fit_all_marginals(x_all, x_fn, y_all, y_fn):
 
 
     # 3. y_all  →  Gaussian + generalised-normal mixture
-    u, xr, pdf_vals, cdf_vals, params = fit_gauss_gennorm(y_all)
+    u, xr, pdf_vals, cdf_vals, params = fit_double_gauss(y_all)
+    #u, xr, pdf_vals, cdf_vals, params = fit_moyal(y_all)
+    #u, xr, pdf_vals, cdf_vals, params = fit_double_gennorm(y_all)
     if np.any(u > 1):
         raise ValueError("CDF values exceed 1, check fit and interpolation")
     if np.any(u < 0):
         raise ValueError("CDF values below 0, check fit and interpolation")
     
     # if u or v = 1, set to 0.999 to avoid issues with copula fitting
-    u = np.clip(u, 0.0001, 0.9999)
+    u = np.clip(u, lower_clip, upper_clip)
 
     # 3. y_all  →  Gaussian + generalised-normal mixture
-    report_fit("y_all", "gauss_gennorm", params)
+    #report_fit("y_all", "gauss_gennorm", params)
+    #report_fit("y_all", "moyal", params)
+    report_fit("y_all", "double_gauss", params)
+
     results["y_all"] = dict(x=y_all, u=u, xr=xr, pdf_vals=pdf_vals,
                             cdf_vals=cdf_vals, params=params)
     
     # 4. y_fn  →  single Gaussian
     #u, xr, pdf_vals, cdf_vals, params = fit_single_gauss(y_fn)
-    u, xr, pdf_vals, cdf_vals, params = fit_single_gennorm(y_fn)
-
-    if np.any(u > 1):
-        raise ValueError("CDF values exceed 1, check fit and interpolation")
-    if np.any(u < 0):
-        raise ValueError("CDF values below 0, check fit and interpolation")
-    
-    # if u or v = 1, set to 0.999 to avoid issues with copula fitting
-    u = np.clip(u, 0.0001, 0.9999)
-
-
-    #report_fit("y_fn", "single_gauss", params)
-    report_fit("y_fn", "single_gennorm", params)
+    #u, xr, pdf_vals, cdf_vals, params = fit_single_gennorm(y_fn)
+    # 4. y_fn  →  double gennorm, inheriting loc1/loc2 from y_all fit
+    inherited_locs = (params["mu1"], params["mu2"])
+    u, xr, pdf_vals, cdf_vals, params = fit_double_gauss(
+        y_fn, fixed_locs=inherited_locs
+    )
+    # ... validation/clipping ...
+    report_fit("y_fn", "double_gauss (fixed locs)", params)
     results["y_fn"] = dict(x=y_fn, u=u, xr=xr, pdf_vals=pdf_vals,
                            cdf_vals=cdf_vals, params=params)
 
@@ -454,7 +619,7 @@ def compute_kde_pdf(data, x_min=0, n_points=200, bw_method='scott'):
     return xr, pdf_vals
 
 
-def fit_empirical(data, n_bins=61, x_min=0, zero_frac=0.3,
+def fit_empirical(data, n_bins=25, x_min=0,
                   use_kde=True, kde_bw='scott', kde_points=200):
     data = np.asarray(data)
     data = data[data >= x_min]
@@ -479,7 +644,6 @@ def fit_empirical(data, n_bins=61, x_min=0, zero_frac=0.3,
 
     params = dict(x_min=xr[0], x_max=xr[-1])
     return u, xr, pdf_vals, cdf_vals, params
-
 
 
 def fit_all_marginals_empirical(x_all, x_fn, y_all, y_fn):
@@ -563,6 +727,22 @@ def inverse_cdf_single_gennorm(u, params):
     """Analytic inverse (PPF) of a single generalised normal."""
     return stats.gennorm.ppf(np.asarray(u), beta=params['beta'], loc=params['loc'], scale=params['scale'])
 
+
+def inverse_cdf_exponweib(u, params):
+    """Analytic inverse (PPF) of an Exponentiated Weibull."""
+    return stats.exponweib.ppf(np.asarray(u), a=params['a'], c=params['c'], loc=params['loc'], scale=params['scale'])
+
+
+def inverse_cdf_moyal(u, params):
+    """Analytic inverse (PPF) of a Moyal distribution."""
+    return stats.moyal.ppf(np.asarray(u), loc=params['loc'], scale=params['scale'])
+
+
+def inverse_cdf_laplace(u, params):
+    """Analytic inverse (PPF) of a Laplace distribution."""
+    return stats.laplace.ppf(np.asarray(u), loc=params['loc'], scale=params['scale'])
+
+
 def invert_cdf(u, key, pdf_transformations):
     """
     Dispatch inverse CDF for any key in pdf_transformations.
@@ -570,10 +750,14 @@ def invert_cdf(u, key, pdf_transformations):
     """
     res = pdf_transformations[key]
     if key == 'x_all':
-        return inverse_cdf_linear(u, res['params'])
+        #return inverse_cdf_linear(u, res['params'])
+        return inverse_cdf_exponweib(u, res['params'])
     elif key == 'y_fn':
         #return inverse_cdf_single_gauss(u, res['params'])
-        return inverse_cdf_single_gennorm(u, res['params'])
+        #return inverse_cdf_single_gennorm(u, res['params'])
+        return inverse_cdf_numerical(u, res['xr'], res['cdf_vals'])
+    #elif key == 'y_all':
+    #    return inverse_cdf_moyal(u, res['params'])
     else:
         return inverse_cdf_numerical(u, res['xr'], res['cdf_vals'])
 
@@ -606,6 +790,21 @@ def forward_cdf_single_gennorm(x, params):
     return stats.gennorm.cdf(np.asarray(x), beta=params['beta'], loc=params['loc'], scale=params['scale'])
 
 
+def forward_cdf_exponweib(x, params):
+    """Analytic CDF of an Exponentiated Weibull."""
+    return stats.exponweib.cdf(np.asarray(x), a=params['a'], c=params['c'], loc=params['loc'], scale=params['scale'])
+
+
+def forward_cdf_moyal(x, params):
+    """Analytic CDF of a Moyal distribution."""
+    return stats.moyal.cdf(np.asarray(x), loc=params['loc'], scale=params['scale'])
+
+
+def forward_cdf_laplace(x, params):
+    """Analytic CDF of a Laplace distribution."""
+    return stats.laplace.cdf(np.asarray(x), loc=params['loc'], scale=params['scale'])
+
+
 def forward_cdf(x, key, pdf_transformations, model_type = 'parametric'):
     """
     Dispatch forward CDF for any key in pdf_transformations.
@@ -617,10 +816,14 @@ def forward_cdf(x, key, pdf_transformations, model_type = 'parametric'):
     res = pdf_transformations[key]
     if model_type == 'parametric':
         if key == 'x_all':
-            return forward_cdf_linear(x, res['params'])
+            #return forward_cdf_linear(x, res['params'])
+            return forward_cdf_exponweib(x, res['params'])
         elif key == 'y_fn':
             #return forward_cdf_single_gauss(x, res['params'])
-            return forward_cdf_single_gennorm(x, res['params'])
+            #return forward_cdf_single_gennorm(x, res['params'])
+            return forward_cdf_numerical(x, res['xr'], res['cdf_vals'])
+     #   elif key == 'y_all':
+     #       return forward_cdf_moyal(x, res['params'])
         else:
             return forward_cdf_numerical(x, res['xr'], res['cdf_vals'])
     elif model_type == 'empirical':
@@ -659,6 +862,22 @@ def density_single_gennorm(x, params):
     """Analytic single generalised normal PDF."""
     return stats.gennorm.pdf(np.asarray(x), beta=params['beta'], loc=params['loc'], scale=params['scale'])
 
+
+def density_exponweib(x, params):
+    """Analytic Exponentiated Weibull PDF."""
+    return stats.exponweib.pdf(np.asarray(x), a=params['a'], c=params['c'], loc=params['loc'], scale=params['scale'])
+
+
+def density_moyal(x, params):
+    """Analytic Moyal PDF."""
+    return stats.moyal.pdf(np.asarray(x), loc=params['loc'], scale=params['scale'])
+                                                                          
+
+def density_laplace(x, params):
+    """Analytic Laplace PDF."""
+    return stats.laplace.pdf(np.asarray(x), loc=params['loc'], scale=params['scale'])
+                                                                         
+
 def empirical_cdf(x):
     """Map data to uniform [0,1] via empirical CDF (rank-based)."""
     return rankdata(np.asarray(x)) / (len(x) + 1)
@@ -674,10 +893,14 @@ def density(x, key, pdf_transformations, model_type='parametric'):
     res = pdf_transformations[key]
     if model_type == 'parametric':
         if key == 'x_all':
-            return density_linear(x, res['params'])
+            #return density_linear(x, res['params'])
+            return density_exponweib(x, res['params'])
         elif key == 'y_fn':
             #return density_single_gauss(x, res['params'])
-            return density_single_gennorm(x, res['params'])
+            #return density_single_gennorm(x, res['params'])
+            return density_numerical(x, res['xr'], res['pdf_vals'])
+        #elif key == 'y_all':
+        #    return density_moyal(x, res['params'])
         else:
             return density_numerical(x, res['xr'], res['pdf_vals'])
         
